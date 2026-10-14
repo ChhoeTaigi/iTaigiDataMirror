@@ -25,6 +25,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PUBLIC_DIR = BASE_DIR / "public"
 MANIFEST_FILE = PUBLIC_DIR / "manifest.json"
 
+# Entries whose 來源 is one of these are copies of other dictionaries that
+# iTaigi imported, not crowdsourced iTaigi content. They are dropped from the
+# bunji output. Matched as exact strings.
+SKIPPED_SOURCES = (
+    "台文華文線頂辭典",
+    "臺灣閩南語常用詞辭典",
+)
+
+FIELDS = ["id", "華語", "漢字", "羅馬字", "來源"]
+
 
 def get_timestamp_dir():
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
@@ -78,27 +88,53 @@ def save_manifest(data):
         json.dump(data, f, indent=2)
 
 
-def json_to_csv(json_path, csv_path):
-    """Convert iTaigi JSON export to CSV."""
+def convert_export(source_json_path, bunji_json_path, bunji_csv_path):
+    """Convert the raw iTaigi export into the bunji JSON and CSV.
+
+    - `id` is the entry's 1-based position in the source export. The export
+      carries no identifier of its own, so this is the only handle back to the
+      source row. Skipped entries keep their slot, so ids have gaps and are
+      only stable within one version.
+    - Entries from SKIPPED_SOURCES are dropped.
+
+    Returns a dict with `total`, `kept` and `skipped` (per source) counts.
+    """
     import csv
 
-    with open(json_path, "r", encoding="utf-8") as f:
+    with open(source_json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    entries = data["資料"]
+    source_entries = data["資料"]
+    skipped = {name: 0 for name in SKIPPED_SOURCES}
+    entries = []
+    for position, entry in enumerate(source_entries, start=1):
+        source = entry.get("來源", "")
+        if source in skipped:
+            skipped[source] += 1
+            continue
+        entries.append({
+            "id": position,
+            "華語": entry.get("華語", ""),
+            "漢字": entry.get("漢字", ""),
+            "羅馬字": entry.get("羅馬字", ""),
+            "來源": source,
+        })
 
-    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+    with open(bunji_json_path, "w", encoding="utf-8") as f:
+        json.dump({"資料": entries}, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    with open(bunji_csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["華語", "漢字", "羅馬字", "來源"])
+        writer.writerow(FIELDS)
         for entry in entries:
-            writer.writerow([
-                entry.get("華語", ""),
-                entry.get("漢字", ""),
-                entry.get("羅馬字", ""),
-                entry.get("來源", ""),
-            ])
+            writer.writerow([entry[field] for field in FIELDS])
 
-    return len(entries)
+    return {
+        "total": len(source_entries),
+        "kept": len(entries),
+        "skipped": skipped,
+    }
 
 
 def main():
@@ -182,11 +218,11 @@ def main():
         csv_path = bunji_dir / "iTaigiSuTian.csv"
         json_path = bunji_dir / "iTaigiSuTian.json"
 
-        print(f"Converting JSON to CSV in {bunji_dir}...")
-        # Copy the source JSON as the "clean" bunji JSON
-        shutil.copy2(tangloo_json, json_path)
-        entry_count = json_to_csv(str(tangloo_json), str(csv_path))
-        print(f"Converted {entry_count} entries.")
+        print(f"Converting export to bunji JSON and CSV in {bunji_dir}...")
+        counts = convert_export(str(tangloo_json), str(json_path), str(csv_path))
+        for source, n in counts["skipped"].items():
+            print(f"Skipped {n} entries from {source}.")
+        print(f"Kept {counts['kept']} of {counts['total']} entries.")
 
         # Compare against previous version
         prev_version = current_manifest.get("latest_version_dir")

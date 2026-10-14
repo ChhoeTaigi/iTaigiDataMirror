@@ -49,11 +49,15 @@ def diff_versions(old_json_path, new_json_path):
         if old_e == new_e:
             continue
         field_changes = []
-        all_fields = sorted(set(old_e) | set(new_e))
+        # `id` is the entry's position in the source export and shifts
+        # whenever an earlier entry is added or removed, so it is not a change.
+        all_fields = sorted((set(old_e) | set(new_e)) - {"id"})
         for f in all_fields:
             ov, nv = old_e.get(f), new_e.get(f)
             if ov != nv:
                 field_changes.append(f"  - `{f}`: {_fmt(ov)} → {_fmt(nv)}")
+        if not field_changes:
+            continue
         modified.append({
             "label": _entry_label(new_e),
             "field_changes": field_changes,
