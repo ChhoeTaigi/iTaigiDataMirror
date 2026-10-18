@@ -1,5 +1,6 @@
 
 import json
+import unicodedata
 from pathlib import Path
 
 
@@ -12,9 +13,21 @@ def _entry_label(entry):
     return huayu or hanji or lomaji or "?"
 
 
+KEY_FIELDS = ("華語", "漢字", "羅馬字", "來源")
+
+
+def _nfc(value):
+    """NFC-normalize a field value; tone marks may be precomposed or combining."""
+    return unicodedata.normalize("NFC", value) if isinstance(value, str) else value
+
+
 def _make_key(entry):
-    """Key for matching entries across versions: (華語, 漢字, 羅馬字)."""
-    return (entry.get("華語", ""), entry.get("漢字", ""), entry.get("羅馬字", ""))
+    """Key for matching entries across versions: the four source fields, NFC
+    normalized. This is the same content `id` is hashed from. Keying on fewer
+    fields collapses rows that differ only in 來源 and reports phantom
+    modifications when the export order changes.
+    """
+    return tuple(_nfc(entry.get(f) or "") for f in KEY_FIELDS)
 
 
 def diff_versions(old_json_path, new_json_path):
@@ -49,11 +62,13 @@ def diff_versions(old_json_path, new_json_path):
         if old_e == new_e:
             continue
         field_changes = []
-        # `id` is the entry's position in the source export and shifts
-        # whenever an earlier entry is added or removed, so it is not a change.
-        all_fields = sorted((set(old_e) | set(new_e)) - {"id"})
+        # `id` is a hash of the key fields, so it is identical for a matched
+        # key unless one side predates the hash ids. `link` is derived from
+        # 華語, which is part of the key, so it can only differ when one side
+        # predates the column.
+        all_fields = sorted((set(old_e) | set(new_e)) - {"id", "link"})
         for f in all_fields:
-            ov, nv = old_e.get(f), new_e.get(f)
+            ov, nv = _nfc(old_e.get(f)), _nfc(new_e.get(f))
             if ov != nv:
                 field_changes.append(f"  - `{f}`: {_fmt(ov)} → {_fmt(nv)}")
         if not field_changes:

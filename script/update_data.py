@@ -4,6 +4,8 @@ import hashlib
 import json
 import shutil
 import sys
+import unicodedata
+import urllib.parse
 from pathlib import Path
 
 try:
@@ -20,6 +22,9 @@ except ImportError:
 
 # Constants
 URL_ITAIGI = "https://itaigi.tw/%E5%8C%AF%E5%87%BA%E8%B3%87%E6%96%99"
+# iTaigi's dictionary page for one Mandarin headword (華語). It lists every
+# Taigi answer for that headword; iTaigi has no page per answer.
+URL_ITAIGI_LOOKUP = "https://itaigi.tw/k/"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PUBLIC_DIR = BASE_DIR / "public"
@@ -33,7 +38,12 @@ SKIPPED_SOURCES = (
     "臺灣閩南語常用詞辭典",
 )
 
-FIELDS = ["id", "華語", "漢字", "羅馬字", "來源"]
+# The four fields of a source row, in the order they are hashed for `id`.
+SOURCE_FIELDS = ("華語", "漢字", "羅馬字", "來源")
+ID_SEPARATOR = "\x1f"  # U+001F unit separator; never appears in the data
+ID_LENGTH = 16  # hex digits of SHA-256 kept
+
+FIELDS = ["id", "華語", "漢字", "羅馬字", "來源", "link"]
 
 
 def get_timestamp_dir():
@@ -88,13 +98,43 @@ def save_manifest(data):
         json.dump(data, f, indent=2)
 
 
+def entry_text(entry):
+    """The four fields of a source row, NFC-normalized and joined with ID_SEPARATOR."""
+    return ID_SEPARATOR.join(
+        unicodedata.normalize("NFC", entry.get(field) or "") for field in SOURCE_FIELDS
+    )
+
+
+def entry_hash(entry):
+    """Content hash of a source row: the first ID_LENGTH hex digits of the
+    SHA-256 of `entry_text`. The same row hashes to the same value in every
+    version; any change to its text or contributor gives a new value.
+    """
+    return hashlib.sha256(entry_text(entry).encode("utf-8")).hexdigest()[:ID_LENGTH]
+
+
+def itaigi_link(huagi):
+    """URL of the iTaigi page listing every Taigi answer for `huagi` (華語).
+
+    Entries that share a 華語 share a link. The headword is percent-encoded so
+    the URL stays valid whatever characters it contains. The trailing slash is
+    iTaigi's canonical form; without it the server answers with a redirect.
+    Empty 華語 gives an empty link rather than a link to the bare search page.
+    """
+    if not huagi:
+        return ""
+    return URL_ITAIGI_LOOKUP + urllib.parse.quote(huagi, safe="") + "/"
+
+
 def convert_export(source_json_path, bunji_json_path, bunji_csv_path):
     """Convert the raw iTaigi export into the bunji JSON and CSV.
 
-    - `id` is the entry's 1-based position in the source export. The export
-      carries no identifier of its own, so this is the only handle back to the
-      source row. Skipped entries keep their slot, so ids have gaps and are
-      only stable within one version.
+    - `id` is a content hash of the row's four fields, see `entry_hash`. The
+      export carries no identifier of its own.
+    - Rows identical to an earlier row in all four fields are dropped, so
+      every id is unique. The export does contain such repeats.
+    - `link` is the iTaigi dictionary page for the entry's 華語, see
+      `itaigi_link`.
     - Entries from SKIPPED_SOURCES are dropped.
 
     Returns a dict with `total`, `kept` and `skipped` (per source) counts.
@@ -106,19 +146,31 @@ def convert_export(source_json_path, bunji_json_path, bunji_csv_path):
 
     source_entries = data["資料"]
     skipped = {name: 0 for name in SKIPPED_SOURCES}
+    seen = set()  # entry_text of every kept row
+    duplicates = 0
     entries = []
-    for position, entry in enumerate(source_entries, start=1):
+    for entry in source_entries:
         source = entry.get("來源", "")
         if source in skipped:
             skipped[source] += 1
             continue
+        text = entry_text(entry)
+        if text in seen:
+            duplicates += 1
+            continue
+        seen.add(text)
         entries.append({
-            "id": position,
+            "id": entry_hash(entry),
             "華語": entry.get("華語", ""),
             "漢字": entry.get("漢字", ""),
             "羅馬字": entry.get("羅馬字", ""),
             "來源": source,
+            "link": itaigi_link(entry.get("華語", "")),
         })
+
+    ids = [e["id"] for e in entries]
+    if len(set(ids)) != len(ids):
+        raise ValueError("id collision between different entries; raise ID_LENGTH")
 
     with open(bunji_json_path, "w", encoding="utf-8") as f:
         json.dump({"資料": entries}, f, ensure_ascii=False, indent=2)
@@ -134,6 +186,7 @@ def convert_export(source_json_path, bunji_json_path, bunji_csv_path):
         "total": len(source_entries),
         "kept": len(entries),
         "skipped": skipped,
+        "duplicates": duplicates,
     }
 
 
@@ -223,6 +276,7 @@ def main():
         for source, n in counts["skipped"].items():
             print(f"Skipped {n} entries from {source}.")
         print(f"Kept {counts['kept']} of {counts['total']} entries.")
+        print(f"Skipped {counts['duplicates']} entries identical to an earlier entry.")
 
         # Compare against previous version
         prev_version = current_manifest.get("latest_version_dir")
